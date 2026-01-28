@@ -2,12 +2,21 @@
 
 iPhone-based baseball pitch tracking using physics-constrained ML. Think TrackMan, but with just your phone.
 
-## What This Does
+## Current Status
 
-Estimates pitch metrics (velocity, spin, break) from iPhone video by:
-1. Using stereo cameras (wide + ultrawide) for depth estimation
-2. Fitting physics parameters to observed ball trajectory
-3. Neural network initialization for fast optimization
+This is a **working prototype** that demonstrates the core approach. It's not production-ready but provides a solid foundation for development.
+
+**What works well:**
+- Physics simulation (ballistic + Magnus effect)
+- Stereo camera depth estimation
+- Physics-constrained trajectory fitting
+- Velocity estimation (~0.1 mph error on synthetic data)
+
+**What needs work:**
+- Ball detection on real video (needs fine-tuned YOLO)
+- Break estimation (~1-2" error, acceptable but not pro-grade)
+- Spin estimation (rough approximation from trajectory)
+- Real-world camera calibration
 
 ## Quick Start
 
@@ -20,35 +29,60 @@ cd pitch-tracker
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-# Install dependencies (GPU)
+# Install dependencies (GPU recommended)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install numpy scipy matplotlib tqdm
+pip install numpy scipy matplotlib tqdm opencv-python ultralytics
 
-# Run the prototype
+# Train the physics model (required first time)
 python run_stereo_prototype.py --step all --samples 10000 --epochs 50
+
+# Test on synthetic data
+python run_full_pipeline.py --synthetic
 ```
 
 ## Architecture
 
 ```
-iPhone Capture
-├── Wide camera (main tracking @ 60fps)
-├── Ultrawide camera (stereo depth)
-└── LiDAR (sparse depth, future)
-         │
-         ▼
-    Ball Detection (YOLO) ──► 2D trajectories
-         │
-         ▼
-    Stereo Triangulation ──► 3D positions + depth
-         │
-         ▼
-    Physics Optimizer
-    ├── Neural initializer (fast starting point)
-    └── L-BFGS-B optimization (fit velocity, spin, angles)
-         │
-         ▼
-    Output: velocity, spin_rate, spin_axis, break, location
+┌─────────────────────────────────────────────────────────────┐
+│                     iPhone Capture                          │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
+│  │ Wide Camera │  │  Ultrawide  │  │   LiDAR     │         │
+│  │   (main)    │  │  (stereo)   │  │  (depth)    │         │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘         │
+└─────────┼────────────────┼────────────────┼─────────────────┘
+          │                │                │
+          ▼                ▼                ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   Ball Detection (YOLO)                     │
+│         Detects baseball in each frame → bounding box       │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   Ball Tracking (Kalman)                    │
+│         Links detections across frames → 2D trajectory      │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   Stereo Triangulation                      │
+│         Wide + Ultrawide → 3D positions + depth             │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                Physics-Constrained Optimizer                │
+│    Fits velocity, spin_rate, spin_axis, release_angles     │
+│    to match observed trajectory using L-BFGS-B              │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      Output Metrics                         │
+│  • Velocity (mph)      • Horizontal Break (inches)          │
+│  • Spin Rate (rpm)     • Vertical Break (inches)            │
+│  • Pitch Type          • Plate Location                     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Project Structure
@@ -60,77 +94,168 @@ pitch_tracker/
 │   │   ├── trajectory.py        # Ballistic + Magnus simulation
 │   │   ├── stereo_camera.py     # iPhone dual-camera model
 │   │   └── trajectory_fitter.py # Physics-constrained optimization
+│   ├── detection/
+│   │   ├── ball_detector.py     # YOLO-based ball detection
+│   │   ├── tracker.py           # Kalman filter tracking
+│   │   └── video_pipeline.py    # Video → trajectory extraction
+│   ├── calibration/
+│   │   ├── camera_calibrator.py # PnP camera calibration
+│   │   └── field_markers.py     # Standard field geometry
+│   ├── pipeline/
+│   │   └── pitch_analyzer.py    # End-to-end analysis
 │   ├── data/
-│   │   ├── pitch_types.py       # MLB pitch profiles (FF, CU, SL, etc.)
+│   │   ├── pitch_types.py       # MLB pitch profiles
 │   │   └── stereo_generator.py  # Synthetic training data
 │   ├── models/
-│   │   ├── trajectory_regressor.py  # (v1, deprecated)
-│   │   └── pitch_classifier.py      # Pitch type classification
+│   │   └── pitch_classifier.py  # Pitch type classification
 │   └── training/
-│       └── train_initializer.py # Neural initializer training
-├── run_stereo_prototype.py      # Main entry point (v2)
-├── run_prototype.py             # Original prototype (v1)
+│       └── train_initializer.py # Neural network training
+├── run_stereo_prototype.py      # Train physics model
+├── run_full_pipeline.py         # End-to-end demo
+├── calibrate_camera.py          # Camera calibration tool
 └── requirements.txt
 ```
 
-## Two Approaches
+## Usage
 
-### V1: Direct Regression (run_prototype.py)
-- LSTM maps 2D trajectory → metrics
-- Fast but less accurate (~50% pitch classification)
-- Good for understanding the problem
+### 1. Train the Physics Model (Required First)
 
-### V2: Physics-Constrained Fitting (run_stereo_prototype.py) ⭐
-- Stereo cameras provide depth
-- Optimizer fits physics parameters to observations
-- More accurate, interpretable, and robust
-
-## Running the Prototypes
-
-### V2 (Recommended)
 ```bash
-# Full pipeline: generate data, train initializer, evaluate
 python run_stereo_prototype.py --step all --samples 10000 --epochs 50
-
-# Just run demo on trained model
-python run_stereo_prototype.py --step demo
 ```
 
-### V1 (Original)
+This trains the neural network that initializes the physics optimizer. Takes ~10-15 minutes on a GPU.
+
+### 2. Calibrate Your Camera
+
+Before analyzing real video, calibrate your camera position:
+
 ```bash
-python run_prototype.py --step all --samples 5000 --epochs 30
+# Quick calibration (if you know camera position)
+python calibrate_camera.py --position 0,2.5,-2 --look-at 0,1,9 --output calibration.json
+
+# Interactive calibration (click on field markers)
+python calibrate_camera.py --video pitch.mp4 --output calibration.json
 ```
+
+Common camera positions (in meters, origin at home plate):
+- Behind mound, high: `--position 0,3,-2 --look-at 0,1,9`
+- Behind mound, low: `--position 0,1.8,-1.5 --look-at 0,0.8,9`
+- Side view (1B side): `--position 12,2,9 --look-at 0,1.2,9`
+- Behind catcher: `--position 0,1.5,20 --look-at 0,1.5,0`
+
+### 3. Analyze Video
+
+```bash
+# Single camera video
+python run_full_pipeline.py --video pitch.mp4
+
+# Stereo video (wide + ultrawide)
+python run_full_pipeline.py --wide-video wide.mp4 --ultra-video ultra.mp4
+
+# Test on synthetic data
+python run_full_pipeline.py --synthetic
+```
+
+## Current Accuracy (Synthetic Data)
+
+| Metric | Mean Error | Notes |
+|--------|------------|-------|
+| Velocity | 0.13 mph | Excellent - approaching TrackMan |
+| H-Break | 1.41 inches | Good - needs seam tracking for better |
+| V-Break | 0.91 inches | Good - same as above |
+| Pitch Type | ~70% | Acceptable - confused on similar pitches |
+
+**Note:** Real-world accuracy will be lower due to detection noise and camera calibration errors.
+
+## Known Limitations
+
+1. **Ball Detection**: The default YOLO model uses COCO's "sports ball" class, which isn't optimized for baseballs in flight. Expect many missed detections, especially with motion blur.
+
+2. **Single Camera Depth**: Without stereo, depth is estimated from motion, which is rough. Stereo video significantly improves accuracy.
+
+3. **Camera Calibration**: The physics fitter assumes known camera geometry. Incorrect calibration → incorrect metrics.
+
+4. **Spin Estimation**: Spin rate/axis are inferred from trajectory curvature, not directly observed. For accurate spin, you need seam tracking.
+
+5. **Processing Speed**: Physics fitting takes ~10 seconds per pitch. Not suitable for real-time yet.
+
+## Next Steps (Priority Order)
+
+### High Priority
+
+1. **Fine-tune YOLO for Baseball Detection**
+   - Collect/label ~1000 frames of baseballs in flight
+   - Train YOLOv8 on baseball-specific data
+   - Handle motion blur with augmentation
+   - Target: 90%+ detection rate
+
+2. **Improve Break Estimation**
+   - Add regularization to physics optimizer
+   - Constrain spin parameters to realistic ranges per pitch type
+   - Consider ensemble of multiple optimizer runs
+
+3. **Real Video Testing**
+   - Collect test videos with known ground truth (Rapsodo/TrackMan data)
+   - Benchmark against pro systems
+   - Identify failure modes
+
+### Medium Priority
+
+4. **Seam Tracking for Spin**
+   - Extract high-res ball crops from video
+   - Train CNN to detect seam orientation
+   - Estimate spin axis from seam rotation
+   - This is how Rapsodo does it
+
+5. **iPhone App Development**
+   - Export models to CoreML
+   - Build Swift UI for capture + analysis
+   - Implement stereo video recording
+
+6. **Speed Optimization**
+   - Profile and optimize physics fitter
+   - Consider GPU-accelerated optimization
+   - Target: <1 second per pitch
+
+### Lower Priority
+
+7. **LiDAR Integration**
+   - Use iPhone LiDAR for sparse but accurate depth
+   - Fuse with stereo depth estimates
+
+8. **Pitcher Pose Estimation**
+   - Extract release point from body pose
+   - Constrain trajectory to start from hand position
+   - This is how PitcherNet works
+
+9. **Cloud Pipeline**
+   - Build API for video upload + analysis
+   - Handle multiple concurrent analyses
+   - Store historical data per player
+
+## Technical References
+
+- [PitcherNet](https://arxiv.org/html/2405.07407v1) - Waterloo/Orioles pitch tracking from video
+- [Baseball Aerodynamics](https://baseballaero.com/) - Physics of pitch movement
+- [TrackMan Technology](https://baseball.physics.illinois.edu/trackman.html) - How pro systems work
 
 ## Hardware Requirements
 
-- GPU: NVIDIA with 6GB+ VRAM (tested on RTX 4060)
-- CPU: Works but slower
-- RAM: 8GB+
+- **GPU**: NVIDIA with 6GB+ VRAM (tested on RTX 4060)
+- **CPU**: Works but slower (~5x)
+- **RAM**: 8GB+
+- **Storage**: ~500MB for models + data
 
-## Next Steps (TODO)
+## Contributing
 
-- [ ] Ball detection module (YOLOv8 fine-tuned on baseball)
-- [ ] Real video ingestion pipeline
-- [ ] iPhone app with CoreML export
-- [ ] Spin estimation from seam tracking
-- [ ] LiDAR depth integration
+This is a research prototype. Key areas needing help:
 
-## How It Works
+1. **Data Collection**: Real pitch videos with ground truth labels
+2. **Ball Detection**: Fine-tuned YOLO model for baseballs
+3. **iOS Development**: Native app with stereo capture
+4. **Testing**: Validation against pro tracking systems
 
-The key insight from [research](https://arxiv.org/html/2405.07407v1): instead of learning a direct mapping from pixels to metrics, we:
+## License
 
-1. **Observe** the ball in 2D from two cameras
-2. **Triangulate** approximate 3D positions
-3. **Optimize** physics parameters (v₀, spin, angles) that explain observations
-4. **Extract** metrics from the fitted trajectory
-
-This is more robust because:
-- Physics constraints ensure plausible predictions
-- Stereo depth resolves scale ambiguity
-- Optimizer finds exact solution, not approximation
-
-## References
-
-- [PitcherNet](https://arxiv.org/html/2405.07407v1) - Waterloo/Orioles pitch tracking from video
-- [PitchLab](https://apps.apple.com/pl/app/pitchlab-baseball/id6738223162) - iPhone pitch tracking app
-- [Baseball Aerodynamics](https://baseballaero.com/) - Physics of pitch movement
+MIT

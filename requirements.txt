@@ -1,6 +1,8 @@
 # Core ML
 torch>=2.0.0
 torchvision>=0.15.0
+
+# Detection (YOLOv8)
 ultralytics>=8.0.0
 
 # Tracking & Vision
@@ -18,3 +20,6 @@ tqdm>=4.65.0
 # Video processing
 imageio>=2.31.0
 imageio-ffmpeg>=0.4.8
+
+# Optional: for faster inference
+# onnxruntime-gpu>=1.15.0
